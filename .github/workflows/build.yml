@@ -46,10 +46,12 @@ jobs:
           # 2. 修复漏写 @MainActor
           find . -name "*.swift" -exec sed -i '' 's/^[[:space:]]*override class func register()/@MainActor override class func register()/g' {} +
 
-          # 3. 彻底修复 WidgetFanFolder.swift:474 的 .ultraThinMaterial.opacity(0.55) 报错
-          # 原因：SwiftUI 的 Shape.fill() 只接受 ShapeStyle，而 .ultraThinMaterial.opacity() 返回的是 _OpacityEffect<Material>，不能放进 .fill() 里！
-          find . -name "WidgetFanFolder.swift" -exec sed -i '' 's/\.fill(\.ultraThinMaterial\.opacity(0\.55))/\.fill(\.ultraThinMaterial)\.opacity(0.55)/g' {} +
-          find . -name "WidgetFanFolder.swift" -exec sed -i '' 's/\.ultraThinMaterial\.opacity(0\.55)/Color.white.opacity(0.35)/g' {} +
+          # 3. 彻底重写 WidgetFanFolder.swift 的 folderFrontPocket 函数，消除 .background/.overlay 链式重载超时！
+          FAN_FILE=$(find . -name "WidgetFanFolder.swift" | head -n 1)
+          if [ -n "$FAN_FILE" ]; then
+            perl -0777 -i -pe 's/private func folderFrontPocket\(s: CGFloat\) -> some View \{.*?\n    \}/private func folderFrontPocket(s: CGFloat) -> some View {\n        ZStack {\n            CleanFolderFrontShape().fill(Color.white.opacity(0.75))\n            CleanFolderFrontShape().stroke(Color.white.opacity(0.9), lineWidth: 0.8 * s)\n        }\n        .frame(width: 116 * s, height: 50 * s)\n        .shadow(color: Color.black.opacity(0.04), radius: 5 * s, y: 2.5 * s)\n    }/s' "$FAN_FILE"
+            echo "已成功重构 $FAN_FILE 中的 folderFrontPocket 函数"
+          fi
 
           SCHEME=$(xcodebuild -list 2>/dev/null | sed -n '/Schemes:/,$p' | tail -n +2 | sed '/^[[:space:]]*$/q' | head -n 1 | xargs)
           if [ -z "$SCHEME" ]; then
@@ -69,7 +71,7 @@ jobs:
             DEVELOPMENT_TEAM="" \
             SWIFT_STRICT_CONCURRENCY=minimal 2>&1 | tee /tmp/build.log || {
               echo "================ 详细编译错误日志 ================"
-              grep -n "error:" /tmp/build.log -B 2 -A 5 || tail -n 50 /tmp/build.log
+              grep -n "error:" /tmp/build.log -B 15 -A 6 || tail -n 80 /tmp/build.log
               exit 1
             }
 
