@@ -29,7 +29,7 @@ jobs:
           rm -rf __MACOSX
           find . -name "._*" -delete
 
-          # 2. 找到 Package.swift 所在目录，并将其重命名为纯英文无空格路径（彻底消灭空格与括号引发的 PCM 缓存崩溃）
+          # 2. 将工程重命名为纯英文无空格路径
           PKG_FILE=$(find . -name "Package.swift" -not -path "*/.*" -not -path "*/__MACOSX*" | head -n 1)
           if [ -z "$PKG_FILE" ]; then
             echo "❌ 错误：未找到 Package.swift"
@@ -42,14 +42,19 @@ jobs:
           # 3. 清理重复的 Assets.xcassets
           find . -name "Assets.xcassets" | tail -n +2 | while IFS= read -r dup; do rm -rf "$dup"; done
 
-          # 4. 🔧 自动修复代码中的 3 处编译冲突：
-          # (a) 修复 WidgetKoreanSheet.swift 与 WidgetBubbleSheet.swift 中同名 private struct 符号冲突
+          # 4. 🔧 自动修复代码中的编译问题：
+          # (a) 修复 WidgetFanFolder.swift:474 编译器类型推断超时 (核心报错！)
+          if [ -f "Widgets/WidgetFanFolder.swift" ]; then
+            sed -i '' 's/\.fill(\.ultraThinMaterial\.opacity(0\.55))/\.fill(\.ultraThinMaterial)\.opacity(0.55)/g' "Widgets/WidgetFanFolder.swift"
+          fi
+
+          # (b) 修复 WidgetKoreanSheet.swift 与 WidgetBubbleSheet.swift 中同名 private struct 符号冲突
           if [ -f "Widgets/WidgetKoreanSheet.swift" ]; then
             sed -i '' 's/IOSNativeGroupedCard/KR_IOSNativeGroupedCard/g' "Widgets/WidgetKoreanSheet.swift"
             sed -i '' 's/IOSNativeSubBox/KR_IOSNativeSubBox/g' "Widgets/WidgetKoreanSheet.swift"
           fi
 
-          # (b) 修复 WidgetBubble.swift 和 WidgetKorean.swift 漏写 @MainActor 导致的并发重写报错
+          # (c) 修复漏写 @MainActor 导致的并发重写报错
           find . -name "*.swift" -exec sed -i '' 's/^[[:space:]]*override class func register()/@MainActor override class func register()/g' {} +
 
           # 5. 获取 Scheme
@@ -59,7 +64,7 @@ jobs:
           fi
           echo "🚀 准备编译 Scheme: [$SCHEME]"
 
-          # 6. 开始编译（注意：把 derivedDataPath 放到包外部的 /tmp/build，严禁污染 path: "." 源码目录！）
+          # 6. 开始编译
           set -o pipefail
           xcodebuild build \
             -scheme "$SCHEME" \
@@ -70,9 +75,10 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            SWIFT_STRICT_CONCURRENCY=minimal 2>&1 | tee /tmp/build.log || {
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            OTHER_SWIFT_FLAGS="-Xfrontend -solver-expression-time-threshold=60" 2>&1 | tee /tmp/build.log || {
               echo "================ ❌ 详细编译错误日志 ❌ ================"
-              grep -E "error:" /tmp/build.log -B 2 -A 3 || tail -n 50 /tmp/build.log
+              grep -E ": error:" /tmp/build.log -B 2 -A 5 || tail -n 50 /tmp/build.log
               exit 1
             }
 
