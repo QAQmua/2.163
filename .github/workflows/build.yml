@@ -24,174 +24,39 @@ jobs:
 
       - name: 解压、自动修复代码冲突并编译
         run: |
-          # 1. 解压 zip 并清理 Mac 隐藏垃圾文件
           find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
           rm -rf __MACOSX
           find . -name "._*" -delete
 
-          # 2. 将工程重命名为纯英文无空格路径
           PKG_FILE=$(find . -name "Package.swift" -not -path "*/.*" -not -path "*/__MACOSX*" | head -n 1)
           if [ -z "$PKG_FILE" ]; then
-            echo "❌ 错误：未找到 Package.swift"
+            echo "未找到 Package.swift"
             exit 1
           fi
           ORIG_DIR=$(dirname "$PKG_FILE")
           mv "$ORIG_DIR" ./CleanApp.swiftpm
           cd ./CleanApp.swiftpm
 
-          # 3. 清理重复的 Assets.xcassets
           find . -name "Assets.xcassets" | tail -n +2 | while IFS= read -r dup; do rm -rf "$dup"; done
 
-          # 4. 🔧 使用 Python 精准修复所有 Swift 源码中的编译问题
-          python3 - << 'EOF'
-          import os, re
+          # 1. 修复 WidgetKoreanSheet.swift 重名冲突
+          find . -name "WidgetKoreanSheet.swift" -exec sed -i '' 's/IOSNativeGroupedCard/KR_IOSNativeGroupedCard/g' {} +
+          find . -name "WidgetKoreanSheet.swift" -exec sed -i '' 's/IOSNativeSubBox/KR_IOSNativeSubBox/g' {} +
 
-          for root, dirs, files in os.walk("."):
-              for f in files:
-                  if not f.endswith(".swift"):
-                      continue
-                  path = os.path.join(root, f)
-                  with open(path, "r", encoding="utf-8") as fp:
-                      content = fp.read()
-                  orig = content
+          # 2. 修复漏写 @MainActor
+          find . -name "*.swift" -exec sed -i '' 's/^[[:space:]]*override class func register()/@MainActor override class func register()/g' {} +
 
-                  # (1) 彻底拆解 WidgetFanFolder.swift 中导致类型推断超时的复杂视图表达式
-                  if "WidgetFanFolder.swift" in f:
-                      # 替换整个 body 与 folderFrontPocket，消除多重三目运算符嵌套
-                      pattern = r"var body: some View \{[\s\S]*?private func folderFrontPocket\(s: CGFloat\) -> some View \{[\s\S]*?\.shadow\(color: Color\.black\.opacity\(0\.04\), radius: 5 \* s, y: 2\.5 \* s\)\s*\}"
-                      replacement = """var body: some View {
-        let s = uiScale
-        let baseBottomPad: CGFloat = 8 * s
-        
-        ZStack(alignment: .bottom) {
-            Color.clear
-            
-            folderBackplate(s: s)
-                .padding(.bottom, baseBottomPad)
-                .opacity(focusedIndex == nil ? 1.0 : 0.36)
-                .animation(smoothSpring, value: focusedIndex)
-                .onTapGesture { handleFolderTap() }
-            
-            ZStack(alignment: .bottom) {
-                ForEach(0..<5, id: \\.self) { idx in
-                    fanCardItemView(idx: idx, s: s)
-                }
-            }
-            .padding(.bottom, baseBottomPad + (3 * s))
-            
-            folderFrontPocket(s: s)
-                .padding(.bottom, baseBottomPad)
-                .opacity(focusedIndex == nil ? 1.0 : 0.36)
-                .animation(smoothSpring, value: focusedIndex)
-                .contentShape(Rectangle())
-                .onTapGesture { handleFolderTap() }
-            
-            if showDashedBorder {
-                RoundedRectangle(cornerRadius: 22 * s, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 0.8 * s, dash: [4 * s, 4 * s]))
-                    .allowsHitTesting(false)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
+          # 3. 彻底修复 WidgetFanFolder.swift:474 的 .ultraThinMaterial.opacity(0.55) 报错
+          # 原因：SwiftUI 的 Shape.fill() 只接受 ShapeStyle，而 .ultraThinMaterial.opacity() 返回的是 _OpacityEffect<Material>，不能放进 .fill() 里！
+          find . -name "WidgetFanFolder.swift" -exec sed -i '' 's/\.fill(\.ultraThinMaterial\.opacity(0\.55))/\.fill(\.ultraThinMaterial)\.opacity(0.55)/g' {} +
+          find . -name "WidgetFanFolder.swift" -exec sed -i '' 's/\.ultraThinMaterial\.opacity(0\.55)/Color.white.opacity(0.35)/g' {} +
 
-    private func computeCardZIndex(idx: Int, isFocused: Bool) -> Double {
-        if isFocused { return 999.0 }
-        if isCenterElevated {
-            if idx == 2 { return 10.0 }
-            return Double(idx < 2 ? idx : (4 - idx))
-        }
-        return Double(4 - idx)
-    }
-
-    @ViewBuilder
-    private func fanCardItemView(idx: Int, s: CGFloat) -> some View {
-        let isFocused = (focusedIndex == idx)
-        let isOtherFocused = (focusedIndex != nil && !isFocused)
-        let fanCfg = fanConfigs[idx]
-        let currentCardW: CGFloat = isFocused ? (92 * s) : (isFanned ? (52 * s) : (54 * s))
-        let currentCardH: CGFloat = isFocused ? (102 * s) : (isFanned ? (58 * s) : (60 * s))
-        let collapsedX: CGFloat = CGFloat(idx - 2) * 13.0 * s
-        let showCardShadow: Bool = isFanned || isFocused
-        let staggerDelay: Double = isFanned ? (Double(abs(idx - 2)) * 0.016) : (Double(2 - abs(idx - 2)) * 0.012)
-        let cardAnimation = smoothSpring.delay(staggerDelay)
-        let cardBlur: CGFloat = isOtherFocused ? 3.0 : (idx == 2 ? centerTransitionBlur : 0.0)
-        let rotAngle: Double = isFocused ? 0.0 : (isFanned ? fanCfg.angle : 0.0)
-        let offX: CGFloat = isFocused ? 0.0 : (isFanned ? (fanCfg.x * s) : collapsedX)
-        let offY: CGFloat = isFocused ? (-10.0 * s) : (isFanned ? (fanCfg.y * s) : 0.0)
-        let scaleVal: CGFloat = isOtherFocused ? 0.88 : 1.0
-        let opacityVal: Double = isOtherFocused ? 0.0 : 1.0
-        let zVal: Double = computeCardZIndex(idx: idx, isFocused: isFocused)
-
-        flippablePhotoCard(
-            index: idx,
-            width: currentCardW,
-            height: currentCardH,
-            s: s,
-            isFocused: isFocused,
-            hasShadow: showCardShadow
-        )
-        .rotationEffect(.degrees(rotAngle), anchor: UnitPoint(x: 0.5, y: 1.0))
-        .offset(x: offX, y: offY)
-        .scaleEffect(scaleVal)
-        .opacity(opacityVal)
-        .blur(radius: cardBlur)
-        .zIndex(zVal)
-        .animation(cardAnimation, value: isFanned)
-        .animation(smoothSpring, value: focusedIndex)
-        .onTapGesture { handleCardTap(index: idx) }
-    }"""
-
-                      # 先把 body 替换掉，再替换 folderFrontPocket
-                      content = re.sub(
-                          r"var body: some View \{[\s\S]*?\.frame\(maxWidth: \.infinity, maxHeight: \.infinity\)\s*\}",
-                          replacement,
-                          content,
-                          count=1
-                      )
-
-                      pocket_new = """private func folderFrontPocket(s: CGFloat) -> some View {
-        let grad = LinearGradient(colors: [Color.white.opacity(0.95), Color.white.opacity(0.30)], startPoint: .top, endPoint: .bottom)
-        return ZStack {
-            CleanFolderFrontShape()
-                .fill(.ultraThinMaterial)
-                .opacity(0.55)
-            CleanFolderFrontShape()
-                .fill(Color.white.opacity(0.68))
-            CleanFolderFrontShape()
-                .stroke(grad, lineWidth: 0.8 * s)
-        }
-        .frame(width: 116 * s, height: 50 * s)
-        .shadow(color: Color.black.opacity(0.04), radius: 5 * s, y: 2.5 * s)
-    }"""
-                      content = re.sub(
-                          r"private func folderFrontPocket\(s: CGFloat\) -> some View \{[\s\S]*?\.shadow\(color: Color\.black\.opacity\(0\.04\), radius: 5 \* s, y: 2\.5 \* s\)\s*\}",
-                          pocket_new,
-                          content
-                      )
-
-                  # (2) 修复 WidgetKoreanSheet.swift 同名 private struct 冲突
-                  if "WidgetKoreanSheet.swift" in f:
-                      content = content.replace("IOSNativeGroupedCard", "KR_IOSNativeGroupedCard")
-                      content = content.replace("IOSNativeSubBox", "KR_IOSNativeSubBox")
-
-                  # (3) 修复漏写 @MainActor 的 register()
-                  content = re.sub(r"(?m)^(\s*)override class func register\(\)", r"\1@MainActor override class func register()", content)
-
-                  if content != orig:
-                      print(f"✅ 已自动修补文件: {path}")
-                      with open(path, "w", encoding="utf-8") as fp:
-                          fp.write(content)
-          EOF
-
-          # 5. 获取 Scheme
           SCHEME=$(xcodebuild -list 2>/dev/null | sed -n '/Schemes:/,$p' | tail -n +2 | sed '/^[[:space:]]*$/q' | head -n 1 | xargs)
           if [ -z "$SCHEME" ]; then
             SCHEME="幼刀"
           fi
-          echo "🚀 准备编译 Scheme: [$SCHEME]"
+          echo "准备编译 Scheme: [$SCHEME]"
 
-          # 6. 开始编译（如果失败，用 Python 精准提取每一条 error: 的完整信息）
           set -o pipefail
           xcodebuild build \
             -scheme "$SCHEME" \
@@ -200,28 +65,18 @@ jobs:
             -derivedDataPath /tmp/youdao_build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_IDENTITY="" \
+            CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             SWIFT_STRICT_CONCURRENCY=minimal 2>&1 | tee /tmp/build.log || {
-              echo "================ ❌ 详细编译错误日志 ❌ ================"
-              python3 - << 'PYERR'
-          with open("/tmp/build.log", "r", encoding="utf-8", errors="ignore") as f:
-              lines = f.readlines()
-          for i, line in enumerate(lines):
-              if ": error:" in line or "fatal error:" in line or "error: " in line:
-                  start = max(0, i - 1)
-                  end = min(len(lines), i + 5)
-                  print("----------------------------------------")
-                  print("".join(lines[start:end]).strip())
-          PYERR
+              echo "================ 详细编译错误日志 ================"
+              grep -n "error:" /tmp/build.log -B 2 -A 5 || tail -n 50 /tmp/build.log
               exit 1
             }
 
-          # 7. 提取 .app 并注入 Bundle ID 与名字
           mkdir -p Payload
           APP_PATH=$(find /tmp/youdao_build -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "❌ 未找到 .app 产物"
+            echo "未找到 .app 产物"
             exit 1
           fi
           cp -r "$APP_PATH" Payload/
@@ -231,9 +86,8 @@ jobs:
           plutil -replace CFBundleName -string "幼刀" "$PLIST_PATH" || true
           plutil -replace CFBundleDisplayName -string "幼刀" "$PLIST_PATH" || true
 
-          # 8. 打包成 IPA
           zip -r -q "$GITHUB_WORKSPACE/You.ipa" Payload
-          echo "🎉 IPA 打包成功！"
+          echo "IPA 打包成功！"
 
       - name: 发布直装版 IPA 到 Releases
         uses: softprops/action-gh-release@v2
