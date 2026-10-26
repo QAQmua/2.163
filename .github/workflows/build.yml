@@ -42,20 +42,77 @@ jobs:
           # 3. 清理重复的 Assets.xcassets
           find . -name "Assets.xcassets" | tail -n +2 | while IFS= read -r dup; do rm -rf "$dup"; done
 
-          # 4. 🔧 自动修复代码中的编译问题：
-          # (a) 修复 WidgetFanFolder.swift:474 编译器类型推断超时 (核心报错！)
-          if [ -f "Widgets/WidgetFanFolder.swift" ]; then
-            sed -i '' 's/\.fill(\.ultraThinMaterial\.opacity(0\.55))/\.fill(\.ultraThinMaterial)\.opacity(0.55)/g' "Widgets/WidgetFanFolder.swift"
-          fi
+          # 4. 🔧 使用 Python 精准修复所有 Swift 源码中的编译问题（彻底告别 sed 匹配失败）
+          python3 - << 'EOF'
+          import os, glob, re
 
-          # (b) 修复 WidgetKoreanSheet.swift 与 WidgetBubbleSheet.swift 中同名 private struct 符号冲突
-          if [ -f "Widgets/WidgetKoreanSheet.swift" ]; then
-            sed -i '' 's/IOSNativeGroupedCard/KR_IOSNativeGroupedCard/g' "Widgets/WidgetKoreanSheet.swift"
-            sed -i '' 's/IOSNativeSubBox/KR_IOSNativeSubBox/g' "Widgets/WidgetKoreanSheet.swift"
-          fi
+          for root, dirs, files in os.walk("."):
+              for f in files:
+                  if not f.endswith(".swift"):
+                      continue
+                  path = os.path.join(root, f)
+                  with open(path, "r", encoding="utf-8") as fp:
+                      content = fp.read()
+                  orig = content
 
-          # (c) 修复漏写 @MainActor 导致的并发重写报错
-          find . -name "*.swift" -exec sed -i '' 's/^[[:space:]]*override class func register()/@MainActor override class func register()/g' {} +
+                  # (1) 彻底修复 WidgetFanFolder.swift 第 474 行 CleanFolderFrontShape 表达式太复杂导致编译器超时的问题
+                  if "WidgetFanFolder.swift" in f:
+                      old_func = """    private func folderFrontPocket(s: CGFloat) -> some View {
+                  CleanFolderFrontShape()
+                      .fill(Color.white.opacity(0.68))
+                      .background(
+                          CleanFolderFrontShape()
+                              .fill(.ultraThinMaterial.opacity(0.55))
+                      )
+                      .frame(width: 116 * s, height: 50 * s)
+                      .overlay(
+                          CleanFolderFrontShape()
+                              .stroke(
+                                  LinearGradient(
+                                      colors: [Color.white.opacity(0.95), Color.white.opacity(0.30)],
+                                      startPoint: .top,
+                                      endPoint: .bottom
+                                  ),
+                                  lineWidth: 0.8 * s
+                              )
+                      )
+                      .shadow(color: Color.black.opacity(0.04), radius: 5 * s, y: 2.5 * s)
+              }"""
+                      new_func = """    private func folderFrontPocket(s: CGFloat) -> some View {
+                  let grad = LinearGradient(colors: [Color.white.opacity(0.95), Color.white.opacity(0.30)], startPoint: .top, endPoint: .bottom)
+                  let bgShape = CleanFolderFrontShape().fill(.ultraThinMaterial).opacity(0.55)
+                  let strokeShape = CleanFolderFrontShape().stroke(grad, lineWidth: 0.8 * s)
+                  return CleanFolderFrontShape()
+                      .fill(Color.white.opacity(0.68))
+                      .background(bgShape)
+                      .frame(width: 116 * s, height: 50 * s)
+                      .overlay(strokeShape)
+                      .shadow(color: Color.black.opacity(0.04), radius: 5 * s, y: 2.5 * s)
+              }"""
+                      # 使用正则替换整个 folderFrontPocket 函数体，无视缩进差异
+                      content = re.sub(
+                          r"private func folderFrontPocket\(s: CGFloat\) -> some View \{[\s\S]*?\.shadow\(color: Color\.black\.opacity\(0\.04\), radius: 5 \* s, y: 2\.5 \* s\)\s*\}",
+                          new_func.strip(),
+                          content
+                      )
+
+                  # (2) 修复 WidgetKoreanSheet.swift 同名 private struct 冲突
+                  if "WidgetKoreanSheet.swift" in f:
+                      content = content.replace("IOSNativeGroupedCard", "KR_IOSNativeGroupedCard")
+                      content = content.replace("IOSNativeSubBox", "KR_IOSNativeSubBox")
+
+                  # (3) 修复漏写 @MainActor 的 register()
+                  content = re.sub(r"(?m)^(\s*)override class func register\(\)", r"\1@MainActor override class func register()", content)
+
+                  # (4) 为 LocalImageStore.replace 的 completion 加上 @Sendable 兼容，防止 @MainActor didSet 报错
+                  if "LocalImageStore.swift" in f:
+                      content = content.replace("completion: @escaping (String?) -> Void", "completion: @Sendable @escaping (String?) -> Void")
+
+                  if content != orig:
+                      print(f"✅ 已自动修补文件: {path}")
+                      with open(path, "w", encoding="utf-8") as fp:
+                          fp.write(content)
+          EOF
 
           # 5. 获取 Scheme
           SCHEME=$(xcodebuild -list 2>/dev/null | sed -n '/Schemes:/,$p' | tail -n +2 | sed '/^[[:space:]]*$/q' | head -n 1 | xargs)
@@ -64,7 +121,7 @@ jobs:
           fi
           echo "🚀 准备编译 Scheme: [$SCHEME]"
 
-          # 6. 开始编译
+          # 6. 开始编译（如果失败，精准打印所有包含 error: 的完整上下文）
           set -o pipefail
           xcodebuild build \
             -scheme "$SCHEME" \
@@ -75,10 +132,9 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            OTHER_SWIFT_FLAGS="-Xfrontend -solver-expression-time-threshold=60" 2>&1 | tee /tmp/build.log || {
+            SWIFT_STRICT_CONCURRENCY=minimal 2>&1 | tee /tmp/build.log || {
               echo "================ ❌ 详细编译错误日志 ❌ ================"
-              grep -E ": error:" /tmp/build.log -B 2 -A 5 || tail -n 50 /tmp/build.log
+              grep -n "error:" /tmp/build.log -B 1 -A 4 || tail -n 80 /tmp/build.log
               exit 1
             }
 
