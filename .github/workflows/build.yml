@@ -15,7 +15,6 @@ jobs:
 
       - name: 自动匹配最新 Xcode 26 环境
         run: |
-          # 自动搜寻系统中安装的最新 Xcode 26，防止小版本号变动导致切换失败
           XCODE_APP=$(ls -d /Applications/Xcode_26*.app /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
           if [ -n "$XCODE_APP" ]; then
             echo "正在切换到: $XCODE_APP"
@@ -23,53 +22,67 @@ jobs:
           fi
           xcodebuild -version
 
-      - name: 解压、清理并开始云端编译
+      - name: 解压、自动修复代码冲突并编译
         run: |
-          # 1. 解压所有 zip 包，并彻底干掉苹果压缩自带的 __MACOSX 隐藏垃圾文件夹
+          # 1. 解压 zip 并清理 Mac 隐藏垃圾文件
           find . -maxdepth 2 -iname "*.zip" -exec unzip -o -q "{}" \;
           rm -rf __MACOSX
           find . -name "._*" -delete
 
-          # 2. 精准定位 Package.swift 所在目录（完美支持带空格、中文、括号的文件夹名）
+          # 2. 找到 Package.swift 所在目录，并将其重命名为纯英文无空格路径（彻底消灭空格与括号引发的 PCM 缓存崩溃）
           PKG_FILE=$(find . -name "Package.swift" -not -path "*/.*" -not -path "*/__MACOSX*" | head -n 1)
           if [ -z "$PKG_FILE" ]; then
-            echo "❌ 错误：未找到 Package.swift 文件！"
+            echo "❌ 错误：未找到 Package.swift"
             exit 1
           fi
-          
-          PKG_DIR=$(dirname "$PKG_FILE")
-          echo "✅ 成功定位工程目录: $PKG_DIR"
-          cd "$PKG_DIR"
+          ORIG_DIR=$(dirname "$PKG_FILE")
+          mv "$ORIG_DIR" ./CleanApp.swiftpm
+          cd ./CleanApp.swiftpm
 
-          # 3. 清理可能重复的 Assets.xcassets
+          # 3. 清理重复的 Assets.xcassets
           find . -name "Assets.xcassets" | tail -n +2 | while IFS= read -r dup; do rm -rf "$dup"; done
 
-          # 4. 获取完整 Scheme 名称（修复原本 awk $1 遇到空格截断的 Bug）
+          # 4. 🔧 自动修复代码中的 3 处编译冲突：
+          # (a) 修复 WidgetKoreanSheet.swift 与 WidgetBubbleSheet.swift 中同名 private struct 符号冲突
+          if [ -f "Widgets/WidgetKoreanSheet.swift" ]; then
+            sed -i '' 's/IOSNativeGroupedCard/KR_IOSNativeGroupedCard/g' "Widgets/WidgetKoreanSheet.swift"
+            sed -i '' 's/IOSNativeSubBox/KR_IOSNativeSubBox/g' "Widgets/WidgetKoreanSheet.swift"
+          fi
+
+          # (b) 修复 WidgetBubble.swift 和 WidgetKorean.swift 漏写 @MainActor 导致的并发重写报错
+          find . -name "*.swift" -exec sed -i '' 's/^[[:space:]]*override class func register()/@MainActor override class func register()/g' {} +
+
+          # 5. 获取 Scheme
           SCHEME=$(xcodebuild -list 2>/dev/null | sed -n '/Schemes:/,$p' | tail -n +2 | sed '/^[[:space:]]*$/q' | head -n 1 | xargs)
           if [ -z "$SCHEME" ]; then
             SCHEME="幼刀"
           fi
           echo "🚀 准备编译 Scheme: [$SCHEME]"
 
-          # 5. 执行无签名 Release 编译
+          # 6. 开始编译（注意：把 derivedDataPath 放到包外部的 /tmp/build，严禁污染 path: "." 源码目录！）
+          set -o pipefail
           xcodebuild build \
             -scheme "$SCHEME" \
             -destination "generic/platform=iOS" \
             -configuration Release \
-            -derivedDataPath ./build \
+            -derivedDataPath /tmp/youdao_build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" \
+            SWIFT_STRICT_CONCURRENCY=minimal 2>&1 | tee /tmp/build.log || {
+              echo "================ ❌ 详细编译错误日志 ❌ ================"
+              grep -E "error:" /tmp/build.log -B 2 -A 3 || tail -n 50 /tmp/build.log
+              exit 1
+            }
 
-          # 6. 提取 .app 并注入 Bundle ID 与应用名称
+          # 7. 提取 .app 并注入 Bundle ID 与名字
           mkdir -p Payload
-          APP_PATH=$(find ./build -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find /tmp/youdao_build -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "❌ 错误：编译未生成 .app 文件！"
+            echo "❌ 未找到 .app 产物"
             exit 1
           fi
-          echo "✅ 找到编译产物: $APP_PATH"
           cp -r "$APP_PATH" Payload/
 
           PLIST_PATH=$(find Payload -maxdepth 2 -name "Info.plist" | head -n 1)
@@ -77,9 +90,9 @@ jobs:
           plutil -replace CFBundleName -string "幼刀" "$PLIST_PATH" || true
           plutil -replace CFBundleDisplayName -string "幼刀" "$PLIST_PATH" || true
 
-          # 7. 打包成 IPA
+          # 8. 打包成 IPA
           zip -r -q "$GITHUB_WORKSPACE/You.ipa" Payload
-          echo "🎉 IPA 打包完成！"
+          echo "🎉 IPA 打包成功！"
 
       - name: 发布直装版 IPA 到 Releases
         uses: softprops/action-gh-release@v2
